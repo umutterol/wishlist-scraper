@@ -23,7 +23,7 @@ jobs:
         run: python run_scraper.py
 
       - name: Clone addon repo
-        run: git clone https://github.com/umutterol/WishListTracker.git addon-repo
+        run: git clone https://x-access-token:${{ secrets.ADDON_REPO_TOKEN }}@github.com/umutterol/WishListTracker.git addon-repo
 
       - name: Copy data files
         run: cp data/* addon-repo/data/
