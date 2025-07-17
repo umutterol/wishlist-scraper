@@ -1,11 +1,15 @@
 import requests
 from bs4 import BeautifulSoup
 import re
-
-ARCHON_URL_PATTERN = "https://www.archon.gg/wow/builds/{spec}/{class_}/mythic-plus/overview/10/all-dungeons/this-week"
-ARCHON_GEAR_URL_PATTERN = "https://www.archon.gg/wow/builds/{spec}/{class_}/mythic-plus/gear-and-tier-set/10/all-dungeons/this-week#gear-tables"
-ARCHON_ENCHANTS_URL_PATTERN = "https://www.archon.gg/wow/builds/{spec}/{class_}/mythic-plus/enchants-and-gems/10/all-dungeons/this-week#enchants#enchants"
-ARCHON_CONSUMABLES_URL_PATTERN = "https://www.archon.gg/wow/builds/{spec}/{class_}/mythic-plus/consumables/10/all-dungeons/this-week#consumables#consumables"
+from .config import (
+    ARCHON_URL_PATTERN,
+    ARCHON_GEAR_URL_PATTERN,
+    ARCHON_ENCHANTS_URL_PATTERN,
+    ARCHON_CONSUMABLES_URL_PATTERN,
+    TALENT_SELECTOR,
+    GEAR_SLOT_SELECTORS,
+    URL_CLASS_NAMES
+)
 
 
 def parse_stat_priority_and_talent(soup):
@@ -98,11 +102,12 @@ def parse_enchants(soup):
         item_id = int(match.group(1)) if match else None
         name = name_tag.get_text(strip=True)
         popularity = pop_tag.get_text(strip=True)
-        slot = slot_tag.get_text(strip=True).upper().replace(' ', '_')
+        slot = slot_tag.get_text(strip=True).upper().replace(' ', '_').replace('-', '')  # Remove dashes
         enchants[slot] = {
             'id': item_id,
             'name': name,
-            'popularity': popularity
+            'popularity': popularity,
+            # 'icon': ...  # Icon scraping is disabled; in-game icons will be used
         }
     return enchants
 
@@ -126,7 +131,8 @@ def parse_epic_gems(soup):
         gems.append({
             'id': item_id,
             'name': name,
-            'popularity': popularity
+            'popularity': popularity,
+            # 'icon': ...  # Icon scraping is disabled; in-game icons will be used
         })
     return gems
 
@@ -157,34 +163,39 @@ def parse_gems(soup):
         gems.append({
             'id': item_id,
             'name': name,
-            'popularity': popularity
+            'popularity': popularity,
+            # 'icon': ...  # Icon scraping is disabled; in-game icons will be used
         })
     return gems
 
 
 def parse_consumables(soup):
     consumables = []
-    for col_idx in [1, 2]:
-        for i in range(1, 6):
-            base_selector = f'#consumables > div > div.builds-best-consumables-section__columns > div:nth-child({col_idx}) > div.builds-best-consumables-section__group > div:nth-child({i}) > div > div.best-consumable-item__name > span > div'
-            a_tag = soup.select_one(base_selector + ' > div.gear-icon__icon > a')
-            name_tag = soup.select_one(base_selector + ' > div.gear-icon__item > div.gear-icon__item-name > a')
-            if not a_tag or not name_tag:
+    # Select both columns of most used consumables
+    columns = soup.select('#consumables > div > div.builds-best-consumables-section__columns > div')
+    for col in columns:
+        # Each group contains multiple consumable items
+        groups = col.select('div.builds-best-consumables-section__group > div')
+        for group in groups:
+            name_tag = group.select_one('div.best-consumable-item__name > span > div > div.gear-icon__item > div.gear-icon__item-name > a')
+            pop_tag = group.select_one('div.best-consumable-item__popularity > span')
+            if not name_tag:
                 continue
-            href = a_tag.get('href', '')
+            href = name_tag.get('href', '')
             match = re.search(r'item=(\d+)', href)
             item_id = int(match.group(1)) if match else None
             name = name_tag.get_text(strip=True)
+            popularity = pop_tag.get_text(strip=True) if pop_tag else ''
             consumables.append({
                 'id': item_id,
-                'name': name
+                'name': name,
+                'popularity': popularity
             })
     return consumables
 
 
 def fetch_talent_string(soup):
-    # Use the provided selector and extract href after /blizzard/
-    a_tag = soup.select_one('#talents > div > div.builds-talent-tree-build-section__talent-trees > div.talent-tree.talent-tree--compact > div.talent-tree__interactions-export > a')
+    a_tag = soup.select_one(TALENT_SELECTOR)
     if a_tag and a_tag.has_attr('href'):
         href = a_tag['href']
         idx = href.find('/blizzard/')
@@ -192,26 +203,11 @@ def fetch_talent_string(soup):
             return href[idx + len('/blizzard/'):].strip()
     return ''
 
-GEAR_SLOT_SELECTORS = {
-    'MAIN_HAND': '#gear-tables > div > div.builds-gear-tables-section__group > div:nth-child(1)',
-    'OFF_HAND': '#gear-tables > div > div.builds-gear-tables-section__group > div:nth-child(2)',
-    'TRINKET': '#gear-tables > div > div.builds-gear-tables-section__group > div:nth-child(3)',
-    'RINGS': '#gear-tables > div > div.builds-gear-tables-section__group > div:nth-child(4)',
-    'HEAD': '#gear-tables > div > div.builds-gear-tables-section__group > div:nth-child(5)',
-    'NECK': '#gear-tables > div > div.builds-gear-tables-section__group > div:nth-child(6)',
-    'SHOULDERS': '#gear-tables > div > div.builds-gear-tables-section__group > div:nth-child(7)',
-    'BACK': '#gear-tables > div > div.builds-gear-tables-section__group > div:nth-child(8)',
-    'CHEST': '#gear-tables > div > div.builds-gear-tables-section__group > div:nth-child(9)',
-    'WRISTS': '#gear-tables > div > div.builds-gear-tables-section__group > div:nth-child(10)',
-    'HANDS': '#gear-tables > div > div.builds-gear-tables-section__group > div:nth-child(11)',
-    'WAIST': '#gear-tables > div > div.builds-gear-tables-section__group > div:nth-child(12)',
-    'LEGS': '#gear-tables > div > div.builds-gear-tables-section__group > div:nth-child(13)',
-    'FEET': '#gear-tables > div > div.builds-gear-tables-section__group > div:nth-child(14)',
-}
 
-def parse_gear_slots(soup):
+def parse_gear_slots(soup, slot_selectors_override=None):
     gear = {}
-    for slot, selector in GEAR_SLOT_SELECTORS.items():
+    selectors = slot_selectors_override if slot_selectors_override else GEAR_SLOT_SELECTORS
+    for slot, selector in selectors.items():
         slot_div = soup.select_one(selector)
         if not slot_div:
             continue
@@ -240,13 +236,17 @@ def parse_gear_slots(soup):
                 'popularity': popularity
             })
         if items:
-            gear[slot] = items
+            norm_slot = slot.replace('-', '').replace('_', '')  # Remove dashes and underscores
+            gear[norm_slot] = items
     return gear
 
 
-def fetch_archon_data(class_name, spec):
+def fetch_archon_data(class_name, spec, icon=None):
+    # Use dash class name for URLs if needed
+    url_class = URL_CLASS_NAMES.get(class_name, class_name)
+    url_class = str(url_class)  # Ensure it's a string
     # Fetch stats and talent string from overview page
-    url = ARCHON_URL_PATTERN.format(spec=spec.lower(), class_=class_name.lower())
+    url = ARCHON_URL_PATTERN.format(spec=spec.lower(), class_=url_class.lower())
     resp = requests.get(url)
     if resp.status_code != 200:
         print(f"Failed to fetch {url}: {resp.status_code}")
@@ -256,17 +256,47 @@ def fetch_archon_data(class_name, spec):
     talent_string = fetch_talent_string(soup)
 
     # Fetch items from gear-and-tier-set page
-    gear_url = ARCHON_GEAR_URL_PATTERN.format(spec=spec.lower(), class_=class_name.lower())
+    gear_url = ARCHON_GEAR_URL_PATTERN.format(spec=spec.lower(), class_=url_class.lower())
     gear_resp = requests.get(gear_url)
     if gear_resp.status_code != 200:
         print(f"Failed to fetch {gear_url}: {gear_resp.status_code}")
         items = {}
     else:
         gear_soup = BeautifulSoup(gear_resp.text, 'html.parser')
-        items = parse_gear_slots(gear_soup)
+        # List of (class_name, spec.lower()) tuples to apply the remapping
+        slot_selectors_override = None
+        remap_specs = [
+            ('warrior', 'arms'),
+            ('deathknight', 'unholy'),
+            ('deathknight', 'blood'),
+            ('druid', 'feral'),
+            ('druid', 'guardian'),
+            ('hunter', 'beast-mastery'),
+            ('hunter', 'marksmanship'),
+            ('hunter', 'survival'),
+            ('paladin', 'retribution'),
+        ]
+        if (class_name, spec.lower()) in remap_specs:
+            slot_selectors_override = GEAR_SLOT_SELECTORS.copy()
+            slot_selectors_override['TRINKET'] = GEAR_SLOT_SELECTORS['OFF_HAND']
+            slot_selectors_override['RINGS'] = GEAR_SLOT_SELECTORS['TRINKET']
+            slot_selectors_override['HEAD'] = GEAR_SLOT_SELECTORS['RINGS']
+            slot_selectors_override['NECK'] = GEAR_SLOT_SELECTORS['HEAD']
+            slot_selectors_override['SHOULDERS'] = GEAR_SLOT_SELECTORS['NECK']
+            slot_selectors_override['BACK'] = GEAR_SLOT_SELECTORS['SHOULDERS']
+            slot_selectors_override['CHEST'] = GEAR_SLOT_SELECTORS['BACK']
+            slot_selectors_override['WRISTS'] = GEAR_SLOT_SELECTORS['CHEST']
+            slot_selectors_override['HANDS'] = GEAR_SLOT_SELECTORS['WRISTS']
+            slot_selectors_override['WAIST'] = GEAR_SLOT_SELECTORS['HANDS']
+            slot_selectors_override['LEGS'] = GEAR_SLOT_SELECTORS['WAIST']
+            slot_selectors_override['FEET'] = GEAR_SLOT_SELECTORS['LEGS']
+            # Remove OFF_HAND for these specs
+            if 'OFF_HAND' in slot_selectors_override:
+                del slot_selectors_override['OFF_HAND']
+        items = parse_gear_slots(gear_soup, slot_selectors_override)
 
     # Fetch enchants, epic gems, and gems from enchants-and-gems page
-    enchants_url = ARCHON_ENCHANTS_URL_PATTERN.format(spec=spec.lower(), class_=class_name.lower())
+    enchants_url = ARCHON_ENCHANTS_URL_PATTERN.format(spec=spec.lower(), class_=url_class.lower())
     enchants_resp = requests.get(enchants_url)
     if enchants_resp.status_code != 200:
         print(f"Failed to fetch {enchants_url}: {enchants_resp.status_code}")
@@ -278,7 +308,7 @@ def fetch_archon_data(class_name, spec):
         gems = parse_gems(enchants_soup)
 
     # Fetch consumables from consumables page
-    consumables_url = ARCHON_CONSUMABLES_URL_PATTERN.format(spec=spec.lower(), class_=class_name.lower())
+    consumables_url = ARCHON_CONSUMABLES_URL_PATTERN.format(spec=spec.lower(), class_=url_class.lower())
     consumables_resp = requests.get(consumables_url)
     if consumables_resp.status_code != 200:
         print(f"Failed to fetch {consumables_url}: {consumables_resp.status_code}")
@@ -290,16 +320,33 @@ def fetch_archon_data(class_name, spec):
     # Format statprio as a string
     statprio_str = ' > '.join(stat_priority)
 
-    # Compose the final structure
+    # Compose the final structure to match data_warrior_template.lua
     result = {
+        'icon': icon or '',
         'talent': talent_string or '',
         'statprio': statprio_str,
         'enchants': enchants,
         'epic_gems': epic_gems,
         'gems': gems,
-        'consumables': consumables,
     }
-    # Add gear slots
-    for slot, items_list in items.items():
-        result[slot] = items_list
+    # Add gear slots in the correct order, splitting FINGER/TRINKET and using MAIN_HAND/OFF_HAND
+    for slot in [
+        'HEAD', 'NECK', 'SHOULDERS', 'BACK', 'CHEST', 'WRISTS', 'HANDS', 'WAIST', 'LEGS', 'FEET',
+        'FINGER1', 'FINGER2', 'MAIN_HAND', 'OFF_HAND', 'TRINKET1', 'TRINKET2'
+    ]:
+        if slot == 'MAIN_HAND' and 'MAINHAND' in items:
+            result[slot] = items['MAINHAND']
+        elif slot == 'OFF_HAND' and 'OFFHAND' in items:
+            result[slot] = items['OFFHAND']
+        elif slot.startswith('FINGER') and 'RINGS' in items:
+            idx = int(slot[-1]) - 1
+            result[slot] = items['RINGS'][idx*5:(idx+1)*5]
+        elif slot.startswith('TRINKET') and 'TRINKET' in items:
+            idx = int(slot[-1]) - 1
+            result[slot] = items['TRINKET'][idx*5:(idx+1)*5]
+        elif slot in items:
+            result[slot] = items[slot]
+        else:
+            result[slot] = []
+    result['consumables'] = consumables
     return result
